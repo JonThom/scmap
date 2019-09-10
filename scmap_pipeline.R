@@ -1,6 +1,6 @@
 # Script to map unannotated clusters in test dataset to annotated clusters in one or more reference sets using scmap
 # Usage: e.g.
-## time Rscript /projects/jonatan/tools/celltype_annotation/scmap_pipeline.R --path_datExpr_test 'c("gf_colon" = "/projects/jonatan/tmp-germfree/RObjects/germfree_seurat_5_creme_colon_seurat_obj.RDS.gz")'  --metadata_test_id_col res.1.2 --paths_datExpr_ref  'c("tab_muris" = "/projects/jonatan/tmp-maca/RObjects/maca_large_intestine.RDS", "regev_etal" = "/projects/jonatan/tmp-germfree/data/atlas_Log2Tmp_round2_ready.csv")' --paths_metadata_ref 'c("tab_muris"=NA, "regev_etal"="/projects/jonatan/tmp-germfree/data/atlas_metadata_ready.csv") --metadata_ref_id_cols 'c("tab_muris"="tissue_subtissue_celltype", "regev_etal" = "Cluster_group")' --threshold 0.5 --prefix_run scmap_1 --dir_out /projects/jonatan/tmp-germfree/ 
+## time Rscript /projects/jonatan/tools/scmap/scmap_pipeline.R --path_datExpr_test 'c("perslab_macparland"="/projects/jonatan/tmp-liver/RObjects/liver_10_samples_seurat_2_all_seurat_obj.RDS.gz")'  --metadata_test_id_col clust.res.1.2  --path_datExpr_ref 'c("macparland" = "/projects/jonatan/tmp-liver/data/macparland_seurat_obj3.RDS.gz")' --metadata_ref_id_col Cluster_annot  --threshold 0.5  --prefix_run scmap_perslab_macparland_joint_1 --dir_out /projects/jonatan/tmp-liver/ --RAM_Gb_max 250
 
 # Requires Seurat 3!
 # * Get Sankey plot working (googleVis)
@@ -8,7 +8,7 @@
 # References
 # * SingleCellExperiment: https://bioconductor.org/packages/release/bioc/vignettes/SingleCellExperiment/inst/doc/intro.html
 # * scmap: http://bioconductor.org/packages/release/bioc/vignettes/scmap/inst/doc/scmap.html
-# * scmap article: https://www.nature.com/articles/nmeth.4644 
+# * scmap article: https://www.nature.com/articles/nmeth.4644
 ######################################################################
 ########################### OptParse #################################
 ######################################################################
@@ -16,7 +16,7 @@
 suppressPackageStartupMessages(library(optparse))
 
 option_list <- list(
-  
+
   make_option("--path_datExpr_test", type="character",
               help = "Quoted named vector of length 1 with full path to test data in .RData or .RDS format, optionally gzip compressed, containing gene*cell matrix, data.frame or seurat object with @data"), #TODO:do we need e.g. var.genes?
   make_option("--path_metadata_test", type="character", default=NULL,
@@ -28,29 +28,66 @@ option_list <- list(
   make_option("--path_metadata_ref", type="character", default=NULL,
               help = "If cell identities are not included in the expression data file, a character with the full path to reference set metadata in .RData or .RDS format, optionally gzip compressed, data.frame. Not required if datExpr_ref is a Seurat 3 object with cell identities in the Idents slot"), #TODO:do we need e.g. var.genes?
   make_option("--metadata_ref_id_col", type="character", default=NULL,
-              help = "If cell identities are provided in paths_metadata_ref, character giving the column name"), #TODO:do we need e.g. var.genes?
+              help = "If cell identities are provided in path_metadata_ref, character giving the column name"), #TODO:do we need e.g. var.genes?
   make_option("--threshold", type="numeric", default=0.5,
               help = "Threshold parameter to pass to scmapCluster(), [default %default]"), #TODO:do we need e.g. var.genes?
   make_option("--prefix_run", type="character", default = "1",
-              help = "Run prefix for output files, [default %default]"),   
+              help = "Run prefix for output files, [default %default]"),
   make_option("--dir_out", type="character",
-              help = "Project directory to which to write files. Should include subdirectories /tables, /RObjects, /plots, /log, else they will be created"),  
+              help = "Project directory to which to write files. Should include subdirectories /tables, /RObjects, /plots, /log, else they will be created"),
   make_option("--RAM_Gb_max", type="integer", default=250,
               help = "Upper limit on Gb RAM available. Taken into account when setting up parallel processes. [default %default]")
 )
 
 ######################################################################
-######################### UTILITY FUNCTIONS ##########################
+######################### GET SCRIPT DIR #############################
 ######################################################################
 
-source(file="/projects/jonatan/tools/functions-src/utility_functions.R")
-source(file="/projects/jonatan/tools/functions-src/functions_sc.R")
+LocationOfThisScript = function() # Function LocationOfThisScript returns the location of this .R script (may be needed to source other files in same dir)
+{
+  #' @usage returns the current location of the script
+  #' @value directory of the script, character
+
+  if (interactive()) {
+    stop("LocationOfThisScript does not work in interactive sessions")
+  }
+
+  this.file = NULL
+  # This file may be 'sourced'
+  for (i in -(1:sys.nframe())) {
+    if (identical(sys.function(i), base::source)) this.file = (normalizePath(sys.frame(i)$ofile))
+  }
+
+  if (!is.null(this.file)) return(dirname(this.file))
+
+  # But it may also be called from the command line
+  cmd.args = commandArgs(trailingOnly = FALSE)
+  cmd.args.trailing = commandArgs(trailingOnly = TRUE)
+  cmd.args = cmd.args[seq.int(from=1, length.out=length(cmd.args) - length(cmd.args.trailing))]
+  res = gsub("^(?:--file=(.*)|.*)$", "\\1", cmd.args)
+
+  # If multiple --file arguments are given, R uses the last one
+  res = tail(res[res != ""], 1)
+  if (0 < length(res)) return(dirname(res))
+
+  # Both are not the case. Maybe we are in an R GUI?
+  return(NULL)
+}
+
+######################################################################
+######################### UTILITY FUNCTIONS ##########################
+######################################################################
+#scriptDir = "/projects/jonatan/tools/scmap/"
+scriptDir <- paste0(LocationOfThisScript(),"/")
+
+source(file=paste0(scriptDir, "perslab-sc-library/utility_functions.R"))
+source(file=paste0(scriptDir, "perslab-sc-library/functions_sc.R"))
 
 ######################################################################
 ########################### PACKAGES #################################
 ######################################################################
 
-ipak(c("Seurat", "dplyr", "scmap", "ggplot2", "SingleCellExperiment"))#, "googleVis")) 
+ipak(c("Seurat", "dplyr", "scmap", "ggplot2", "SingleCellExperiment"))#, "googleVis"))
 stopifnot(as.character(packageVersion("Seurat"))=='3.0.0.9000')
 
 ######################################################################
@@ -63,9 +100,9 @@ path_datExpr_test <- eval(parse(text=opt$path_datExpr_test))
 path_metadata_test <- opt$path_metadata_test
 #if (!is.null(path_metadata_test)) path_metadata_test <- eval(parse(text=path_metadata_test))
 metadata_test_id_col <- opt$metadata_test_id_col
-path_datExpr_ref <- eval(parse(text=opt$paths_datExpr_ref))
+path_datExpr_ref <- eval(parse(text=opt$path_datExpr_ref))
 path_metadata_ref <- opt$path_metadata_ref
-metadata_ref_id_cols <- opt$metadata_ref_id_cols
+metadata_ref_id_col <- opt$metadata_ref_id_col
 #if (!is.null(metadata_ref_id_cols)) metadata_ref_id_cols <- eval(parse(text=metadata_ref_id_cols))
 threshold <- opt$threshold
 prefix_run <- opt$prefix_run
@@ -76,7 +113,7 @@ RAM_Gb_max <- opt$RAM_Gb_max
 ########################### SET OPTIONS ##############################
 ######################################################################
 
-options(stringsAsFactors = F, na.action="na.omit")
+options(stringsAsFactors = F, na.action="na.omit", warn=1)
 
 ######################################################################
 ############################ CONSTANTS ###############################
@@ -87,14 +124,14 @@ if (!is.null(names(path_datExpr_ref))) prefix_ref <- names(path_datExpr_ref) els
 
 flag_date = substr(gsub("-","",as.character(Sys.Date())),3,1000)
 
-# if specified output directory doesn't exist, create it 
+# if specified output directory doesn't exist, create it
 if (!file.exists(dir_out)) {
-  dir.create(dir_out) 
+  dir.create(dir_out)
   message("Project directory not found, new one created")
 }
 
 dir_plots = paste0(dir_out,"plots/")
-if (!file.exists(dir_plots)) dir.create(dir_plots) 
+if (!file.exists(dir_plots)) dir.create(dir_plots)
 
 dir_tables = paste0(dir_out,"tables/")
 if (!file.exists(dir_tables)) dir.create(dir_tables)
@@ -115,18 +152,18 @@ vec_n_features = c(500) # as recommended to balance specificity and sensitivity
 ######################################################################
 
 ident_test <- NULL
-ident_ref <- NULL 
+ident_ref <- NULL
 
 if (!is.null(path_metadata_test)) {
   metadata_test <- load_obj(path_metadata_test)
   # if (any(grepl(pattern="X", x = colnames(metadata_test), fixed = T))){
-  #   rownames(metadata_test) <- metadata_test[["X"]]  
+  #   rownames(metadata_test) <- metadata_test[["X"]]
   # }
   ident_test <- metadata_test[[metadata_test_id_col]]
 }
 
 if (!is.null(path_metadata_ref)) {
-  lident_ref <- #mapply(function(path_metadata_ref, id_col) {
+  ident_ref <- #mapply(function(path_metadata_ref, id_col) {
     #if (!is.na(path_metadata_ref)) {
       tryCatch({
         metadata_ref_tmp <- load_obj(path_metadata_ref)}, error= function(err){stop(paste0(path_metadata_ref, " not found"))})
@@ -155,13 +192,14 @@ fun = function(path_datExpr) {
   datExpr_tmp <- load_obj(path_datExpr)
   if ("Seurat" %in% class(datExpr_tmp)) {
     #metadata <- datExpr_tmp@meta.data
-    datExpr <- GetAssayData(datExpr_tmp)
-    ident <- Idents(datExpr_tmp)
+    datExpr <- GetAssayData(datExpr_tmp, slot="data", assay="RNA")
+    ident <- Idents(datExpr_tmp) %>% as.character
+    names(ident) <- colnames(datExpr_tmp)
     #datExpr <- datExpr_tmp@data
   } else {
     datExpr <- datExpr_tmp
     if (any(grepl(pattern="X", x = colnames(datExpr), fixed = T))) {
-      rownames(datExpr) <- datExpr[["X"]]  
+      rownames(datExpr) <- datExpr[["X"]]
       datExpr[["X"]] <- NULL
     }
   }
@@ -174,10 +212,10 @@ fun = function(path_datExpr) {
 list_data_test <- fun(path_datExpr_test)
 datExpr_test <- list_data_test[["datExpr"]]
 
-if (is.null(ident_test)) {
+if (all(is.null(ident_test))) {
   ident_test <- list_data_test[["ident"]]
-  if (is.null(ident_test) | is.na(ident_test)) stop("provide cell identity metadata for test data set either in seurat object or separate file")
-} 
+  if (all(is.null(ident_test)) | all(is.na(ident_test))) stop("provide cell identity metadata for test data set either in seurat object or separate file")
+}
 
 rm(list_data_test)
 
@@ -186,29 +224,29 @@ rm(list_data_test)
 list_data_ref <- fun(path_datExpr_ref)
 datExpr_ref <- list_data_ref[["datExpr"]]
 
-if (is.null(ident_ref)) {
+if (all(is.null(ident_ref))) {
   ident_ref <- list_data_ref[["ident"]]
-  if (is.null(ident_ref) | is.na(ident_ref)) stop("provide cell identity metadata for ref data set either in seurat object or separate file")
-} 
+  if (all(is.null(ident_ref)) | all(is.na(ident_ref))) stop("provide cell identity metadata for ref data set either in seurat object or separate file")
+}
 
 rm(list_data_ref)
 
-# args=list("X"=paths_datExpr_ref)
-# list_list_data_ref <- safeParallel(fun=fun, args=args)
-# 
+# list_iterable=list("X"=paths_datExpr_ref)
+# list_list_data_ref <- safeParallel(fun=fun, list_iterable=list_iterable)
+#
 # list_datExpr_ref <- lapply(list_list_data_ref, function(list_data_ref) list_data_ref[["datExpr"]] %>% as.matrix)
-# 
+#
 # list_ident_ref <- mapply(function(list_data_ref, ident_ref) {
 #     if (all(is.na(ident_ref))) {
-#       ident_ref <- list_data_ref[["ident"]] 
-#     } 
+#       ident_ref <- list_data_ref[["ident"]]
+#     }
 #     return(ident_ref)
-#   }, 
-#   list_data_ref=list_list_data_ref, 
-#   ident_ref = list_ident_ref, 
+#   },
+#   list_data_ref=list_list_data_ref,
+#   ident_ref = list_ident_ref,
 #   SIMPLIFY=F)
-# 
-# 
+#
+#
 # if (any(sapply(list_ident_ref, is.na))) stop("provide metadata for reference sets either in seurat objects or separate file")
 # rm(list_list_data_ref)
 
@@ -225,8 +263,8 @@ fun = function(colnames_datExpr, ident) {
 ident_test <- fun(colnames_datExpr=colnames(datExpr_test), ident=ident_test)
 # ref
 ident_ref <- fun(colnames_datExpr = colnames(datExpr_ref), ident=ident_ref)
-# args=list("colnames_datExpr"=lapply(list_datExpr_ref, colnames),"ident"=list_ident_ref)
-# list_ident_ref <- safeParallel(fun=fun, args=args)
+# list_iterable=list("colnames_datExpr"=lapply(list_datExpr_ref, colnames),"ident"=list_ident_ref)
+# list_ident_ref <- safeParallel(fun=fun, list_iterable=list_iterable)
 
 ######################################################################
 ########## MAKE CELL CLUSTER SCE OBJECTS, SELECT FEATURES ############
@@ -234,7 +272,7 @@ ident_ref <- fun(colnames_datExpr = colnames(datExpr_ref), ident=ident_ref)
 
 message("Subsetting test data")
 
-list_datExpr_test_sub <- lapply(names(table(ident_test)), function(id){ 
+list_datExpr_test_sub <- lapply(names(table(ident_test)), function(id){
   datExpr_test[,ident_test==id]
   #SubsetData(datExpr_test, ident.use = id, do.clean = T)
 })
@@ -247,29 +285,29 @@ outfile = paste0(dir_log, prefix_test, "_", prefix_run, "_subset_make_sce.txt")
 
 #For each subset, try a range of values for n features (genes) to use in aligning with clusters in the reference dataset
 
-fun <- function(datExpr_test_sub) {
-  sce_test_sub <- SingleCellExperiment(assays=list(logcounts = as.matrix(datExpr_test_sub)), 
-                                  colData = list(colnames = colnames(datExpr_test_sub)), 
+fun <- function(datExpr_test_sub, vec_n_features) {
+  sce_test_sub <- SingleCellExperiment(assays=list(logcounts = as.matrix(datExpr_test_sub)),
+                                  colData = list(colnames = colnames(datExpr_test_sub)),
                                   rowData = list(rownames = rownames(datExpr_test_sub)))
   rm(datExpr_test_sub)
-  
+
   rowData(sce_test_sub)$feature_symbol <- rowData(sce_test_sub)$rownames
-  
-  list_sce_test_sub = lapply(vec_n_features, function(n_features) selectFeatures(sce_test_sub, 
-                                                               suppress_plot=T, 
+
+  list_sce_test_sub = lapply(vec_n_features, function(n_features) selectFeatures(sce_test_sub,
+                                                               suppress_plot=T,
                                                                n_features = n_features))
   for (i in 1:length(vec_n_features)) {
     name <- paste0("scmap_features", i)
     rowData(sce_test_sub)[name] <- rowData(list_sce_test_sub[[i]])$scmap_features
   }
-  
+
   rm(list_sce_test_sub)
-  return(sce_test_sub) 
+  return(sce_test_sub)
 }
 
-args = list("X"=list_datExpr_test_sub)
+list_iterable = list("X"=list_datExpr_test_sub)
 
-list_sce_test_sub <- safeParallel(fun=fun, args=args, outfile=outfile, vec_n_features=vec_n_features)
+list_sce_test_sub <- safeParallel(fun=fun, list_iterable=list_iterable, outfile=outfile, vec_n_features=vec_n_features)
 
 rm(list_datExpr_test_sub)
 
@@ -280,87 +318,85 @@ rm(list_datExpr_test_sub)
 outfile = paste0(dir_log, prefix_run, "_", prefix_test, "_make_sce_ref_findfeatures.txt")
 
 fun <- function(datExpr_ref, ident_ref) {
-  
-  names(rownames(datExpr_ref)) <- NULL
-  
-  sce_ref <- SingleCellExperiment(assays=list(logcounts = as.matrix(datExpr_ref)), 
-                       colData = list(colNames = as.character(colnames(datExpr_ref))), 
+
+  #rownames(datExpr_ref) <- NULL #what is this for? Seems we need it immediately below
+
+  sce_ref <- SingleCellExperiment(assays=list(logcounts = as.matrix(datExpr_ref)),
+                       colData = list(colNames = as.character(colnames(datExpr_ref))),
                        rowData = list(rownames = as.character(rownames(datExpr_ref))))
-  #Add column (cellwise) metadata 
+  #Add column (cellwise) metadata
   colData(sce_ref)$cell_type1 <- gsub(" ", "_", ident_ref)
-  
+
   #Add rowdata - feature_symbol is needed for alignment
   rowData(sce_ref)$feature_symbol <- rowData(sce_ref)$rownames
-  
+
   message("Selecting reference set features")
-  
-  fun1  = function(n_features) selectFeatures(sce_ref, 
-                                             suppress_plot=T, 
+
+  fun1  = function(n_features) selectFeatures(sce_ref,
+                                             suppress_plot=T,
                                              n_features = n_features)
 
   list_sce_ref_tmp <- lapply("X"=vec_n_features, FUN = fun1)
-  
+
   for (i in 1:length(vec_n_features)) {
     name <- paste0("scmap_features", i)
     rowData(sce_ref)[name] <- rowData(list_sce_ref_tmp[[i]])$scmap_features
   }
-  
+
   rm(list_sce_ref_tmp)
- 
+
   return(sce_ref)
 
 }
 
-# args=list(ident_ref = list_ident_ref, 
+# list_iterable=list(ident_ref = list_ident_ref,
 #           datExpr_ref = list_datExpr_ref)
 
 sce_ref <- fun(ident_ref=ident_ref, datExpr_ref=datExpr_ref)
-  
-#safeParallel(fun=fun,args=args, outfile=outfile, vec_n_features=vec_n_features)
+
+#safeParallel(fun=fun,list_iterable=list_iterable, outfile=outfile, vec_n_features=vec_n_features)
 
 ######################################################################
 ###################### FIND SCMAP CLUSTER INDEX ######################
 #####################################################################
-# The scmap-cluster index of a reference dataset is created by finding the median gene expression for each cluster. 
-# By default scmap uses the cell_type1 column of the colData slot in the reference to identify clusters. 
+# The scmap-cluster index of a reference dataset is created by finding the median gene expression for each cluster.
+# By default scmap uses the cell_type1 column of the colData slot in the reference to identify clusters.
 # (Other columns can be manually selected by adjusting indexCluster's cluster_col parameter)
 
 message(paste0(c("Computing scmap cluster index for", vec_n_features, "features"), collapse = " "))
 
 fun <- function(i) {
   index <- paste0("scmap_features",i)
-  rowData(sce_obj)$scmap_features <- rowData(sce_obj)[[index]]
-  return(indexCluster(sce_obj))
+  rowData(sce_ref)$scmap_features <- rowData(sce_ref)[[index]]
+  return(indexCluster(sce_ref))
 }
 
-args = list("X"=1:length(vec_n_features))
+list_iterable = list("X"=1:length(vec_n_features))
 # test sets
-#list_list_sce_test_sub <- lapply("X"=list_sce_test_sub, FUN= function(sce_test_sub) safeParallel(fun=fun, args=args, sce_obj=sce_test_sub))
+#list_list_sce_test_sub <- lapply("X"=list_sce_test_sub, FUN= function(sce_test_sub) safeParallel(fun=fun, list_iterable=list_iterable, sce_obj=sce_test_sub))
 
 # ref sets
 # list_list_sce_ref <- list()
 # for (name in names(list_sce_ref)) {
 #sce_obj=list_sce_ref[[name]]
-list_sce_ref <- safeParallel(fun=fun, args=args, sce_obj=sce_ref)
+list_sce_ref <- safeParallel(fun=fun, list_iterable=list_iterable)
 names(list_sce_ref) <- vec_n_features
 
 
 # Why does the vectorised version not work??
-#list_list_sce_ref <- lapply("X"=list_sce_ref, FUN = function(sce_obj) safeParallel(fun=fun, args=args, sce_obj=sce_obj))
+#list_list_sce_ref <- lapply("X"=list_sce_ref, FUN = function(sce_obj) safeParallel(fun=fun, list_iterable=list_iterable, sce_obj=sce_obj))
 
 # For each n_features,plot heatmaps of cluster index
 message(paste0(c("Plotting scmap cluster index heatmaps for", vec_n_features, "features"), collapse = " "))
 
-par(mfrow=c(1, length(vec_n_features)))
-pdf(file = paste0(dir_plots, prefix_test, "_", prefix_run, "_sce_ref_cluster_index.pdf"))
-for (sce_ref in list_sce_ref) { 
-  heatmap(as.matrix(metadata(sce_ref)$scmap_cluster_index))
-}
-dev.off()
-
-#TODO change from multiple to one datExpr_ref. Got to here
-
-
+try({
+  par(mfrow=c(1, length(vec_n_features)))
+  pdf(file = paste0(dir_plots, prefix_test, "_", prefix_run, "_sce_ref_cluster_index.pdf"))
+  for (sce_ref in list_sce_ref) {
+    heatmap(as.matrix(metadata(sce_ref)$scmap_cluster_index))
+  }
+  dev.off()
+})
 ######################################################################
 ############################ PROJECTION ##############################
 ######################################################################
@@ -370,52 +406,54 @@ dev.off()
 message("scmapCluster projection")
 outfile = paste0(dir_log, prefix_test, "_", prefix_run, "_scmap_align.txt")
 
-listRef_listClust_listnFeat_scmapOuts <- list()
+listClust_listnFeat_scmapOuts <- list()
 
-for (refset in names(list_list_sce_ref)){  # loop over reference set names
-  list_sce_ref <- list_list_sce_ref[[refset]] 
+#for (refset in names(list_list_sce_ref)){  # loop over reference set names
+# list_sce_ref <- list_list_sce_ref[[refset]]
   for (cluster in names(list_sce_test_sub)) { # loop over test sets, i.e. clusters
     sce_test_sub <- list_sce_test_sub[[cluster]]
     fun = function(i) {
       feat <- paste0("scmap_features", i)
       # for hs.liver, select the set of features stores in rowData and set it in position to be found by scmapCluster
       rowData(sce_test_sub)$scmap_features <- rowData(sce_test_sub)[[feat]]
-      
-      result <- tryCatch({scmapCluster(projection = sce_test_sub, 
+
+      result <- tryCatch({scmapCluster(projection = sce_test_sub,
                              index_list = list(ref = metadata(list_sce_ref[[i]])$scmap_cluster_index),
-                             threshold=threshold)}, 
+                             threshold=threshold)},
                          error = function(err) {
                            message(paste0(ref_set, ": ", cluster, ": scmapCluster failed with error: ", err))
                            return(NA_character_)
                          })
       return(result)
     }
-    args = list("X" = 1:length(vec_n_features))
-    listRef_listClust_listnFeat_scmapOuts[[refset]][[cluster]] <- safeParallel(fun=fun, args=args, sce_test_sub=sce_test_sub, list_sce_ref=list_sce_ref, outfile=outfile)
-    names(listRef_listClust_listnFeat_scmapOuts[[refset]][[cluster]]) <- vec_n_features
+    list_iterable = list("X" = 1:length(vec_n_features))
+    listClust_listnFeat_scmapOuts[[cluster]] <- safeParallel(fun=fun, list_iterable=list_iterable, sce_test_sub=sce_test_sub, list_sce_ref=list_sce_ref, outfile=outfile)
+    names(listClust_listnFeat_scmapOuts[[cluster]]) <- vec_n_features
   }
-}
+#}
 
 try(warnings())
 
+saveMeta(savefnc=saveRDS, object = listClust_listnFeat_scmapOuts, file=paste0(dir_RObjects, prefix_run, "_", prefix_test, "_full_scmap_results.RDS.gz"), compress="gzip")
+saveMeta(savefnc=saveRDS, object=list_sce_test_sub, file=paste0(dir_RObjects, prefix_run, "_", prefix_test, "_list_sce_test_sub.RDS.gz"), compress="gzip")
 ######################################################################
 ########## GET ALIGN STATS FOR EACH TEST CLUSTER, N_FEATURES #########
 ######################################################################
-# scmap-cluster projects the query dataset to all projections defined in the index_list. 
+# scmap-cluster projects the query dataset to all projections defined in the index_list.
 # The results of cell label assignements are merged into one matrix
 message("Preparing alignment summary dataframe")
 
-list_results_df <- list()
-k=1
-for (refset in names(list_list_sce_ref)) { 
+#list_results_df <- list()
+#k=1
+#for (refset in names(list_list_sce_ref)) {
   # one dataframe per reference set
-  list_results_df[[refset]] <- if (k==1) { 
-    
-    data.frame(test_cluster = rep(names(table(ident_test)), 
-                 times = rep(length(vec_n_features), 
-                             times= length(names(table(ident_test))))), 
+ # list_results_df[[refset]] <- if (k==1) {
+  results_df <-
+    data.frame(test_cluster = rep(names(table(ident_test)),
+                 times = rep(length(vec_n_features),
+                             times= length(names(table(ident_test))))),
                  n_features = vec_n_features, # recycles
-    prop.assign = 0, 
+    prop.assign = 0,
     ref_dataset = NA_character_,
     ref_celltype_1 = NA_character_,
     n_cells_assigned_1 = NA_integer_,
@@ -427,87 +465,88 @@ for (refset in names(list_list_sce_ref)) {
     n_cells_assigned_4 = NA_integer_,
     ref_celltype_5 = NA_character_,
     n_cells_assigned_5 = NA_integer_,
-    stringsAsFactors = F) 
-  } else {
-    data.frame(prop.assign = rep(0, nrow(list_results_df[[1]])), 
-               ref_dataset = NA_character_,
-               ref_celltype_1 = NA_character_,
-               n_cells_assigned_1 = NA_integer_,
-               ref_celltype_2 = NA_character_,
-               n_cells_assigned_2 = NA_integer_,
-               ref_celltype_3 = NA_character_,
-               n_cells_assigned_3 = NA_integer_,
-               ref_celltype_4 = NA_character_,
-               n_cells_assigned_4 = NA_integer_,
-               ref_celltype_5 = NA_character_,
-               n_cells_assigned_5 = NA_integer_,
-               stringsAsFactors = F)
-  }
-  
-  for (i in 1:length(listRef_listClust_listnFeat_scmapOuts[[refset]])) { # loop over cell clusters in test set to align
-    for (j  in 1:length(listRef_listClust_listnFeat_scmapOuts[[refset]][[i]])) { # loop over n features
+    remainder=NA_integer_,
+    stringsAsFactors = F)
+  # } else {
+  #   data.frame(prop.assign = rep(0, nrow(list_results_df[[1]])),
+  #              ref_dataset = NA_character_,
+  #              ref_celltype_1 = NA_character_,
+  #              n_cells_assigned_1 = NA_integer_,
+  #              ref_celltype_2 = NA_character_,
+  #              n_cells_assigned_2 = NA_integer_,
+  #              ref_celltype_3 = NA_character_,
+  #              n_cells_assigned_3 = NA_integer_,
+  #              ref_celltype_4 = NA_character_,
+  #              n_cells_assigned_4 = NA_integer_,
+  #              ref_celltype_5 = NA_character_,
+  #              n_cells_assigned_5 = NA_integer_,
+  #              stringsAsFactors = F)
+  # }
+  refset <- names(path_datExpr_ref)
+  for (i in 1:length(listClust_listnFeat_scmapOuts)) { # loop over cell clusters in test set to align
+    for (j  in 1:length(listClust_listnFeat_scmapOuts[[i]])) { # loop over n features
       idx_row <- (i-1)*length(vec_n_features)+j
-      list_results_df[[refset]][[idx_row,'prop.assign']] <- if(!is.null(listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs)) 1-sum(listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref']=="unassigned")/nrow(listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs) else NA_real_
-      list_results_df[[refset]][[idx_row,'ref_dataset']] <- refset
-      if (!is.null(listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs)) {
-        list_results_df[[refset]][[idx_row,'ref_celltype_1']] <- if (!is.null(listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref'])) {
-          tryCatch({listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref'] %>% table %>% sort(.,decreasing = T) %>% names %>% '[['(1)
+      results_df[[idx_row,'prop.assign']] <- if(!is.null(listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs)) 1-sum(listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref']=="unassigned")/nrow(listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs) else NA_real_
+      results_df[[idx_row,'ref_dataset']] <- refset
+      if (!is.null(listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs)) {
+        results_df[[idx_row,'ref_celltype_1']] <- if (!is.null(listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref'])) {
+          tryCatch({listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref'] %>% table %>% sort(.,decreasing = T) %>% names %>% '[['(1)
             }, error = function(err){NA_character_})
           } else {NA_character_}
-        list_results_df[[refset]][[idx_row,'n_cells_assigned_1']] <- if(!is.null(listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref'])) {
-          tryCatch({listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref'] %>% table %>% sort(.,decreasing = T) %>% '[['(1) 
+        results_df[[idx_row,'n_cells_assigned_1']] <- if(!is.null(listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref'])) {
+          tryCatch({listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref'] %>% table %>% sort(.,decreasing = T) %>% '[['(1)
             }, error = function(err){NA_integer_})
         } else {NA_integer_}
-        list_results_df[[refset]][[idx_row,'ref_celltype_2']] <- if (!is.null(listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref'])) {
-          tryCatch({listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref'] %>% table %>% sort(.,decreasing = T) %>% names %>% '[['(2) 
+        results_df[[idx_row,'ref_celltype_2']] <- if (!is.null(listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref'])) {
+          tryCatch({listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref'] %>% table %>% sort(.,decreasing = T) %>% names %>% '[['(2)
             }, error = function(err){NA_character_})
         } else {NA_character_}
-        list_results_df[[refset]][[idx_row,'n_cells_assigned_2']] <- if (!is.null(listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref'])) {
-          tryCatch({listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref'] %>% table %>% sort(.,decreasing = T) %>% '[['(2)
+        results_df[[idx_row,'n_cells_assigned_2']] <- if (!is.null(listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref'])) {
+          tryCatch({listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref'] %>% table %>% sort(.,decreasing = T) %>% '[['(2)
             }, error = function(err){NA_integer_})
         } else {NA_integer_}
-        list_results_df[[refset]][[idx_row,'ref_celltype_3']] <- if (!is.null(listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref'])) {
+        results_df[[idx_row,'ref_celltype_3']] <- if (!is.null(listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref'])) {
           tryCatch({
-            listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref'] %>% table %>% sort(.,decreasing = T) %>% names %>% '[['(3)
+            listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref'] %>% table %>% sort(.,decreasing = T) %>% names %>% '[['(3)
             }, error = function(err){NA_character_})
         } else {NA_character_}
-        list_results_df[[refset]][[idx_row,'n_cells_assigned_3']] <- if(!is.null(listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref'])) {
-          tryCatch({listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref']  %>% table %>% sort(.,decreasing = T) %>% '[['(3)
+        results_df[[idx_row,'n_cells_assigned_3']] <- if(!is.null(listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref'])) {
+          tryCatch({listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref']  %>% table %>% sort(.,decreasing = T) %>% '[['(3)
             }, error = function(err){NA_integer_})
         } else {NA_integer_}
-        list_results_df[[refset]][[idx_row,'ref_celltype_4']] <- if (!is.null(listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref'])) {
+        results_df[[idx_row,'ref_celltype_4']] <- if (!is.null(listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref'])) {
           tryCatch({
-            listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref'] %>% table %>% sort(.,decreasing = T) %>% names %>% '[['(4)
+            listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref'] %>% table %>% sort(.,decreasing = T) %>% names %>% '[['(4)
           }, error = function(err){NA_character_})
         } else {NA_character_}
-        list_results_df[[refset]][[idx_row,'n_cells_assigned_4']] <- if(!is.null(listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref'])) {
-          tryCatch({listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref']  %>% table %>% sort(.,decreasing = T) %>% '[['(4)
+        results_df[[idx_row,'n_cells_assigned_4']] <- if(!is.null(listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref'])) {
+          tryCatch({listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref']  %>% table %>% sort(.,decreasing = T) %>% '[['(4)
           }, error = function(err){NA_integer_})
         } else {NA_integer_}
-        list_results_df[[refset]][[idx_row,'ref_celltype_5']] <- if (!is.null(listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref'])) {
+        results_df[[idx_row,'ref_celltype_5']] <- if (!is.null(listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref'])) {
           tryCatch({
-            listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref'] %>% table %>% sort(.,decreasing = T) %>% names %>% '[['(5)
+            listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref'] %>% table %>% sort(.,decreasing = T) %>% names %>% '[['(5)
           }, error = function(err){NA_character_})
         } else {NA_character_}
-        list_results_df[[refset]][[idx_row,'n_cells_assigned_5']] <- if(!is.null(listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref'])) {
-          tryCatch({listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref']  %>% table %>% sort(.,decreasing = T) %>% '[['(5)
+        results_df[[idx_row,'n_cells_assigned_5']] <- if(!is.null(listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref'])) {
+          tryCatch({listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref']  %>% table %>% sort(.,decreasing = T) %>% '[['(5)
           }, error = function(err){NA_integer_})
         } else {NA_integer_}
-        list_results_df[[refset]][[idx_row,'remainder']] <- if(!is.null(listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref'])) {
+        results_df[[idx_row,'remainder']] <- if(!is.null(listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref'])) {
           tryCatch({
-            length(listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref']) -sum(table(listRef_listClust_listnFeat_scmapOuts[[refset]][[i]][[j]]$scmap_cluster_labs[,'ref']) %>% sort(., decreasing=T) %>% '['(1:5))
+            length(listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref']) -sum(table(listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref']) %>% sort(., decreasing=T) %>% '['(1:5))
           }, error = function(err){NA_integer_})
         } else {NA_integer_}
       }
     }
   }
-  k=k+1
-}
+  #k=k+1
+#}
 
-results_df <- if (length(list_results_df)==1) list_results_df[[1]] else Reduce(f=cbind, x=list_results_df) 
+#results_df <- if (length(list_results_df)==1) list_results_df[[1]] else Reduce(f=cbind, x=list_results_df)
 
 # write to disk
-write.csv(results_df, sprintf("%s%s_%s_scmap_results_df.csv", dir_tables, prefix_test, prefix_run), row.names=F)
+saveMeta(savefnc=write.csv, x=results_df, file=sprintf("%s%s_%s_scmap_results_df.csv", dir_tables, prefix_test, prefix_run), row.names=F)
 
 ######################################################################
 ############################# PLOTS ##################################
@@ -526,8 +565,8 @@ message("Plotting")
 #   }
 # }
 
-# The results of scmap-cluster can be visualized as a Sankey diagram to show how cell-clusters are matched (getSankey() function). 
-# Note that the Sankey diagram will only be informative if both the query and the reference datasets have been clustered, 
+# The results of scmap-cluster can be visualized as a Sankey diagram to show how cell-clusters are matched (getSankey() function).
+# Note that the Sankey diagram will only be informative if both the query and the reference datasets have been clustered,
 # but it is not necessary to have meaningful labels assigned to the query (cluster1, cluster2 etc. is sufficient)
 
 # for (name in names(list_sce_test_sub)) {
@@ -539,7 +578,7 @@ message("Plotting")
 #     pdf(sprintf("%s%s_%s_scmapCluster_Sankey_cluster_%s_n_features_%s.pdf", dir_plots, prefix_test, prefix_run, names(table(as.character(metadata_test[[metadata_test_id_col]])))[i], vec_n_features[j]),h=10,w=16)
 #     # TODO: need to address error: GDK_BACKEND does not match available displays
 #     # https://askubuntu.com/questions/359753/gtk-warning-locale-not-supported-by-c-library-when-starting-apps-from-th
-#     p <- getSankey(reference = colData(list_sce_test_sub[[j]])$cell_type1, 
+#     p <- getSankey(reference = colData(list_sce_test_sub[[j]])$cell_type1,
 #                 clusters = listClust_listnFeat_scmapOuts[[i]][[j]]$scmap_cluster_labs[,'ref'],
 #                 plot_height = 400)
 
@@ -551,67 +590,53 @@ message("Plotting")
 ######################################################################
 #################### FOR EACH CLUSTER GET BEST BET ###################
 ######################################################################
-
-if (FALSE) {
-  sapply(sort(unique(results_df[["test_cluster"]])), function(cluster) {
-    results_df_clust <- results_df[results_df[["test_cluster"]]==cluster,]
-    idx_col_prop_assign <- seq(from=3, by=3, to=ncol(results_df_clust))
-    idx_idx_rowmax_col <- apply(X = results_df_clust[,idx_col_prop_assign, drop=F], MARGIN=1, FUN = which.max)
-    idx_col_max <- sapply(idx_idx_rowmax_col, function(idx) idx_col_prop_assign[idx])
-    idx_row_max <- which.max(sapply(idx_col_max, function(idx) results_df_clust[,idx, drop=F], simplify = T))
-    results_df_clust[idx_row_max, c(idx_col_max[idx_row_max]:(idx_col_max[idx_row_max]+2))]
-  }, simplify = T) %>% t -> bestFits
-  
-  # write to disk 
-  
-  write.csv(bestFits, file = paste0(dir_tables, prefix_test, "_", prefix_run, "_scmap_bestfits.csv"), quote = F,row.names = T)
-}
+#
+# if (FALSE) {
+#   sapply(sort(unique(results_df[["test_cluster"]])), function(cluster) {
+#     results_df_clust <- results_df[results_df[["test_cluster"]]==cluster,]
+#     idx_col_prop_assign <- seq(from=3, by=3, to=ncol(results_df_clust))
+#     idx_idx_rowmax_col <- apply(X = results_df_clust[,idx_col_prop_assign, drop=F], MARGIN=1, FUN = which.max)
+#     idx_col_max <- sapply(idx_idx_rowmax_col, function(idx) idx_col_prop_assign[idx])
+#     idx_row_max <- which.max(sapply(idx_col_max, function(idx) results_df_clust[,idx, drop=F], simplify = T))
+#     results_df_clust[idx_row_max, c(idx_col_max[idx_row_max]:(idx_col_max[idx_row_max]+2))]
+#   }, simplify = T) %>% t -> bestFits
+#
+#   # write to disk
+#
+#   write.csv(bestFits, file = paste0(dir_tables, prefix_test, "_", prefix_run, "_scmap_bestfits.csv"), quote = F,row.names = T)
+# }
 ######################################################################
 ############### PLOT SCMAP CLUSTER ANNOTATION ON TSNE ################
 ######################################################################
-  
-datExpr_test <- load_obj(path_datExpr_test)
-if ("Seurat" %in% class(datExpr_test)) {
-  Idents(datExpr_test) <- datExpr_test$clust.res.1.2
-  scmap_annot_labels <- paste0(results_df[["ref_celltype_1"]], ":", results_df[["n_cells_assigned_1"]], ", ", results_df[["ref_celltype_2"]], ":", results_df[["n_cells_assigned_2"]], ", ",results_df[["ref_celltype_3"]], ":", results_df[["n_cells_assigned_3"]])
-  names(scmap_annot_labels) <- names(listRef_listClust_listnFeat_scmapOuts[[names(list_list_sce_ref)[1]]])
-  datExpr_test$scmap_annot <- scmap_annot_labels[match(Idents(datExpr_test),  names(scmap_annot_labels))]
 
-  try({
-    if (is.null(datExpr_test@reductions$pca)) datExpr_test <- RunPCA(datExpr_test,npcs = 30)
-    if (is.null(datExpr_test@reductions$tsne))datExpr_test <- RunTSNE(datExpr_test, dims=1:30)
-    #bestFits[match(ident_test, rownames(bestFits)),c(2,3)] %>% apply("X"=., MARGIN = 1, FUN=function(rowvec) paste0(rowvec, collapse = ", ")) %>% paste0(ident_test, ": ", .)-> scmap_annot
-    #Idents(datExpr_test) <- datExpr_test$scmap_annot
-    DimPlot(object = datExpr_test, 
-            reduction="tsne",
-            group.by = "scmap_annot",
-            label.size= 6 ,
-            #pt.size=2,
-            #dims=c(1,2),
-            #legend="none",
-            label=T
-            #plot.title = "scmap cluster annotation"
-            )
-    ggsave(filename = paste0(dir_plots, prefix_test, "_", prefix_run, "_tSNE_scmap_annot.pdf"), width = 40, height=30)
-  })
-  saveRDS(object=datExpr_test, file=gsub("\\.RDS\\..*", ".RDS.gz", path_datExpr_test), compress = "gzip")
-  
+datExpr_test <- load_obj(path_datExpr_test)
+
+if (!"Seurat" %in% class(datExpr_test)) {
+  datExpr_test <- CreateSeuratObject(counts=datExpr_test,
+  project=names(path_datExpr_test))
 }
 
-######################################################################
-########################### RECORD PARAMETERS ########################
-######################################################################
+if (is.null(datExpr_test@reductions$pca)) datExpr_test <- RunPCA(datExpr_test,npcs = 30)
+if (is.null(datExpr_test@reductions$tsne)) datExpr_test <- RunTSNE(datExpr_test, dims=1:30)
 
-matrix(unlist(opt), nrow=1, dimnames=list(NULL, c(names(opt)))) %>% as.data.frame(row.names=NULL, stringsAsFactors=F) -> params_run_df
-params_run_path = sprintf("%s%s_%s_params_run.tab", dir_log, prefix_test, prefix_run)
-# write to disk
-write.table(params_run_df, file=params_run_path, quote = F, sep = "\t", row.names=F, append = F, col.names = T)
+  #datExpr_test[[metadata_test_id_col]] else
+  #Idents(datExpr_test) <- ident_ref datExpr_test[[metadata_test_id_col]]
+scmap_annot_labels <- paste0("(",results_df[["test_cluster"]], ") ", results_df[["ref_celltype_1"]], ":", results_df[["n_cells_assigned_1"]], ", ", results_df[["ref_celltype_2"]], ":", results_df[["n_cells_assigned_2"]], ", ",results_df[["ref_celltype_3"]], ":", results_df[["n_cells_assigned_3"]])
+names(scmap_annot_labels) <- names(listClust_listnFeat_scmapOuts)
+datExpr_test$scmap_annot <- scmap_annot_labels[match(ident_test,  names(scmap_annot_labels))]
+
+#Idents(datExpr_test) <- datExpr_test$scmap_annot
+DimPlot(object = datExpr_test,
+        reduction="tsne",
+        group.by = "scmap_annot",
+        label.size= 6 ,
+        label=T)
+saveMeta(savefnc=ggsave, filename = paste0(dir_plots, prefix_test, "_", prefix_run, "_tSNE_scmap_annot.pdf"), width = 40, height=30)
+
+saveMeta(savefnc=saveRDS, object=datExpr_test, file=gsub("\\.RDS\\..*", paste0("_", prefix_run, ".RDS.gz"), path_datExpr_test), compress = "gzip")
 
 ######################################################################
 ############################ WRAP UP #################################
 ######################################################################
-
-#message("Saving session image")
-#save.image(file=sprintf("%s%s_%s_scmap_%s.RData", dir_RObjects, prefix_test, prefix_run, flag_date))
 
 message("Script done!")
