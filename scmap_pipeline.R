@@ -1,18 +1,27 @@
 # Script to map unannotated clusters in test dataset to annotated clusters in one or more reference sets using scmap
-# Usage: e.g.
-## time Rscript /projects/jonatan/tools/scmap/scmap_pipeline.R --path_datExpr_test 'c("perslab_macparland"="/projects/jonatan/tmp-liver/RObjects/liver_10_samples_seurat_2_all_seurat_obj.RDS.gz")'  --metadata_test_id_col clust.res.1.2  --path_datExpr_ref 'c("macparland" = "/projects/jonatan/tmp-liver/data/macparland_seurat_obj3.RDS.gz")' --metadata_ref_id_col Cluster_annot  --threshold 0.5  --prefix_run scmap_perslab_macparland_joint_1 --dir_out /projects/jonatan/tmp-liver/ --RAM_Gb_max 250
 
-# Requires Seurat 3!
-# * Get Sankey plot working (googleVis)
+#' @usage time Rscript /projects/jonatan/tools/scmap/scmap_pipeline.R --path_datExpr_test 'c("perslab"="/projects/jonatan/pub-perslab/18-liver-fred/output/liver_perslab_int_seurat_7_SCTint_finalLabels_seuratObj.RDS.gz")'  --metadata_test_id_col cluster_perslab  --path_datExpr_ref 'c("macparland" = "/projects/jonatan/pub-perslab/18-liver-fred/data/macparland_seurat_obj3_Samples245.RDS.gz")' --metadata_ref_id_col Cluster_annot  --threshold 0.5  --prefix_run scmap_perslab_macparland_test_1 --dir_out /projects/jonatan/190910_scmapTest/ --RAM_Gb_max 250
+#' @depends devtools, here, optparse, parallel, dplyr, ggplot2, Seurat 3, SingleCellExperiment, scmap
+#' @return list of single cell experiment objects (RDS.gz)
+#' @return full scmap results (RDS.gz)
+#' @return mapping results as table (.csv)
+#' @return test dataset as Seurat Object with new cell labels added to metadata (RDS.gz)
+#' @return heatmap(s) of features selected for mapping
+#' @return UMAP plot of test dataset with new cell labels
+#' @author Jonatan Thompson, rkm at ku dot dk
+#' 
+#' TODO 
+#' * Get Sankey plot working (googleVis)
 
 # References
-# * SingleCellExperiment: https://bioconductor.org/packages/release/bioc/vignettes/SingleCellExperiment/inst/doc/intro.html
-# * scmap: http://bioconductor.org/packages/release/bioc/vignettes/scmap/inst/doc/scmap.html
+# * SingleCellExperiment bioconductor: https://bioconductor.org/packages/release/bioc/vignettes/SingleCellExperiment/inst/doc/intro.html
+# * scmap vignette: http://bioconductor.org/packages/release/bioc/vignettes/scmap/inst/doc/scmap.html
 # * scmap article: https://www.nature.com/articles/nmeth.4644
+
 ######################################################################
 ########################### OptParse #################################
 ######################################################################
-
+suppressPackageStartupMessages(library(here))
 suppressPackageStartupMessages(library(optparse))
 
 option_list <- list(
@@ -29,6 +38,8 @@ option_list <- list(
               help = "If cell identities are not included in the expression data file, a character with the full path to reference set metadata in .RData or .RDS format, optionally gzip compressed, data.frame. Not required if datExpr_ref is a Seurat 3 object with cell identities in the Idents slot"), #TODO:do we need e.g. var.genes?
   make_option("--metadata_ref_id_col", type="character", default=NULL,
               help = "If cell identities are provided in path_metadata_ref, character giving the column name"), #TODO:do we need e.g. var.genes?
+  make_option("--vec_n_features", type="character", default='c(500)',
+              help = "Quoted vector. How many features to use in mapping cells to clusters. Can give several values to try, e.g. 'c(500,1000,1500)' 500 recommended for best sensitivity/specificity balance but do inspect plots https://www.nature.com/articles/nmeth.4644, [default %default]"), #TODO:do we need e.g. var.genes?
   make_option("--threshold", type="numeric", default=0.5,
               help = "Threshold parameter to pass to scmapCluster(), [default %default]"), #TODO:do we need e.g. var.genes?
   make_option("--prefix_run", type="character", default = "1",
@@ -39,56 +50,25 @@ option_list <- list(
               help = "Upper limit on Gb RAM available. Taken into account when setting up parallel processes. [default %default]")
 )
 
-######################################################################
-######################### GET SCRIPT DIR #############################
-######################################################################
-
-LocationOfThisScript = function() # Function LocationOfThisScript returns the location of this .R script (may be needed to source other files in same dir)
-{
-  #' @usage returns the current location of the script
-  #' @value directory of the script, character
-
-  if (interactive()) {
-    stop("LocationOfThisScript does not work in interactive sessions")
-  }
-
-  this.file = NULL
-  # This file may be 'sourced'
-  for (i in -(1:sys.nframe())) {
-    if (identical(sys.function(i), base::source)) this.file = (normalizePath(sys.frame(i)$ofile))
-  }
-
-  if (!is.null(this.file)) return(dirname(this.file))
-
-  # But it may also be called from the command line
-  cmd.args = commandArgs(trailingOnly = FALSE)
-  cmd.args.trailing = commandArgs(trailingOnly = TRUE)
-  cmd.args = cmd.args[seq.int(from=1, length.out=length(cmd.args) - length(cmd.args.trailing))]
-  res = gsub("^(?:--file=(.*)|.*)$", "\\1", cmd.args)
-
-  # If multiple --file arguments are given, R uses the last one
-  res = tail(res[res != ""], 1)
-  if (0 < length(res)) return(dirname(res))
-
-  # Both are not the case. Maybe we are in an R GUI?
-  return(NULL)
-}
 
 ######################################################################
 ######################### UTILITY FUNCTIONS ##########################
 ######################################################################
-#scriptDir = "/projects/jonatan/tools/scmap/"
-scriptDir <- paste0(LocationOfThisScript(),"/")
 
-source(file=paste0(scriptDir, "perslab-sc-library/utility_functions.R"))
-source(file=paste0(scriptDir, "perslab-sc-library/functions_sc.R"))
+source(file=here("perslab-sc-library","utility_functions.R"))
+source(file=here("perslab-sc-library","functions_sc.R"))
 
 ######################################################################
 ########################### PACKAGES #################################
 ######################################################################
 
-ipak(c("Seurat", "dplyr", "scmap", "ggplot2", "SingleCellExperiment"))#, "googleVis"))
-stopifnot(as.character(packageVersion("Seurat"))=='3.0.0.9000')
+suppressPackageStartupMessages(library(Seurat))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(parallel))
+suppressPackageStartupMessages(library(scmap))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(SingleCellExperiment))
+#library(googleVis) #required for Sankey plot. Currently not implemented
 
 ######################################################################
 ########################### GET OPTIONS ##############################
@@ -104,6 +84,7 @@ path_datExpr_ref <- eval(parse(text=opt$path_datExpr_ref))
 path_metadata_ref <- opt$path_metadata_ref
 metadata_ref_id_col <- opt$metadata_ref_id_col
 #if (!is.null(metadata_ref_id_cols)) metadata_ref_id_cols <- eval(parse(text=metadata_ref_id_cols))
+vec_n_features <- eval(parse(text=opt$vec_n_features))
 threshold <- opt$threshold
 prefix_run <- opt$prefix_run
 dir_out <- opt$dir_out
@@ -142,11 +123,8 @@ if (!file.exists(dir_RObjects)) dir.create(dir_RObjects)
 dir_log = paste0(dir_out,"log/")
 if (!file.exists(dir_log)) dir.create(dir_log)
 
-# For scmap
-
-vec_n_features = c(500) # as recommended to balance specificity and sensitivity
-# https://www.nature.com/articles/nmeth.4644
-
+randomSeed = 12345
+set.seed(randomSeed)
 ######################################################################
 ########################## LOAD METADATA ############################
 ######################################################################
@@ -427,7 +405,11 @@ listClust_listnFeat_scmapOuts <- list()
       return(result)
     }
     list_iterable = list("X" = 1:length(vec_n_features))
-    listClust_listnFeat_scmapOuts[[cluster]] <- safeParallel(fun=fun, list_iterable=list_iterable, sce_test_sub=sce_test_sub, list_sce_ref=list_sce_ref, outfile=outfile)
+    listClust_listnFeat_scmapOuts[[cluster]] <- safeParallel(fun=fun, 
+                                                             list_iterable=list_iterable, 
+                                                             #sce_test_sub=sce_test_sub, 
+                                                             #list_sce_ref=list_sce_ref, 
+                                                             outfile=outfile)
     names(listClust_listnFeat_scmapOuts[[cluster]]) <- vec_n_features
   }
 #}
@@ -609,6 +591,10 @@ message("Plotting")
 ############### PLOT SCMAP CLUSTER ANNOTATION ON TSNE ################
 ######################################################################
 
+message("Plotting new cluster assignment in test dataset")
+
+message("loading dataset")
+
 datExpr_test <- load_obj(path_datExpr_test)
 
 if (!"Seurat" %in% class(datExpr_test)) {
@@ -616,9 +602,18 @@ if (!"Seurat" %in% class(datExpr_test)) {
   project=names(path_datExpr_test))
 }
 
-if (is.null(datExpr_test@reductions$pca)) datExpr_test <- RunPCA(datExpr_test,npcs = 30)
-if (is.null(datExpr_test@reductions$tsne)) datExpr_test <- RunTSNE(datExpr_test, dims=1:30)
-
+if (is.null(datExpr_test@reductions$pca)) {
+  message("Running PCA")
+  datExpr_test <- RunPCA(datExpr_test,
+                         npcs = 30, 
+                         seed.use = randomSeed)
+}
+if (is.null(datExpr_test@reductions$tsne)) {
+  message("Running UMAP")
+  datExpr_test <- RunUMAP(datExpr_test, 
+                          dims=1:30,
+                          seed.use= randomSeed)
+}
   #datExpr_test[[metadata_test_id_col]] else
   #Idents(datExpr_test) <- ident_ref datExpr_test[[metadata_test_id_col]]
 scmap_annot_labels <- paste0("(",results_df[["test_cluster"]], ") ", results_df[["ref_celltype_1"]], ":", results_df[["n_cells_assigned_1"]], ", ", results_df[["ref_celltype_2"]], ":", results_df[["n_cells_assigned_2"]], ", ",results_df[["ref_celltype_3"]], ":", results_df[["n_cells_assigned_3"]])
@@ -631,6 +626,9 @@ DimPlot(object = datExpr_test,
         group.by = "scmap_annot",
         label.size= 6 ,
         label=T)
+
+message("Saving test dataset with new annotations added to metadata")
+
 saveMeta(savefnc=ggsave, filename = paste0(dir_plots, prefix_test, "_", prefix_run, "_tSNE_scmap_annot.pdf"), width = 40, height=30)
 
 saveMeta(savefnc=saveRDS, object=datExpr_test, file=gsub("\\.RDS\\..*", paste0("_", prefix_run, ".RDS.gz"), path_datExpr_test), compress = "gzip")
